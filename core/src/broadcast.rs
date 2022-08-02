@@ -15,7 +15,7 @@ where
             let len = shape.as_ref().len();
             let dim = if i < len { &shape.as_ref()[len - i - 1] } else { &one };
             if dim != &D::one() {
-                if wanted_size != D::one() && dim != &wanted_size {
+                if wanted_size != D::one() && dim != &wanted_size && !dim.is_sym() {
                     return None;
                 }
                 wanted_size = dim.clone();

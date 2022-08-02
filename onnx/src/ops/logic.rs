@@ -2,8 +2,8 @@ use crate::model::OnnxOpRegister;
 use crate::model::ParseResult;
 use crate::model::ParsingContext;
 use crate::pb::NodeProto;
-use tract_hir::internal::*;
 use tract_core::ops;
+use tract_hir::internal::*;
 use tract_itertools::Itertools;
 
 pub fn register_all_ops(reg: &mut OnnxOpRegister) {
@@ -102,17 +102,17 @@ impl InferenceOp for If {
         let mut outputs: TVec<InferenceFact> = outputs.into_iter().cloned().collect();
         loop {
             let mut changed = false;
-            changed = changed || inputs[0].datum_type.unify_with(&bool::datum_type().into())?;
+            changed = changed | inputs[0].datum_type.unify_with(&bool::datum_type().into())?;
             for (body_ix, outer_ix) in self.then_input_mapping.iter().enumerate() {
                 changed = changed
-                    || self
+                    | self
                         .then_body
                         .input_fact_mut(body_ix)?
                         .unify_with_mut(&mut inputs[*outer_ix])?;
             }
             for (body_ix, outer_ix) in self.else_input_mapping.iter().enumerate() {
                 changed = changed
-                    || self
+                    | self
                         .else_body
                         .input_fact_mut(body_ix)?
                         .unify_with_mut(&mut inputs[*outer_ix])?;
@@ -122,11 +122,11 @@ impl InferenceOp for If {
                 let body = if a { &mut self.then_body } else { &mut self.else_body };
                 for oix in 0..body.output_outlets()?.len() {
                     changed =
-                        changed || body.output_fact_mut(oix)?.unify_with_mut(&mut outputs[oix])?;
+                        changed | body.output_fact_mut(oix)?.unify_with_mut(&mut outputs[oix])?;
                 }
             }
-            changed = changed || self.then_body.analyse(false)?;
-            changed = changed || self.else_body.analyse(false)?;
+            changed = changed | self.then_body.analyse(false)?;
+            changed = changed | self.else_body.analyse(false)?;
             if !changed {
                 return Ok((inputs, outputs, observed.into_iter().cloned().collect()));
             }
@@ -164,10 +164,83 @@ impl InferenceOp for If {
                     inner_mapping.insert((node, slot_ix).into(), *outlet);
                 }
             }
-            return Ok(body.output_outlets()?.iter().map(|o| inner_mapping[o]).collect());
+
+            Ok(body.output_outlets()?.iter().map(|o| inner_mapping[o]).collect())
+        } else {
+            target.wire_node(
+                &node.name,
+                IfMir {
+                    then_body: self.then_body.clone().into_typed()?,
+                    then_input_mapping: self.then_input_mapping.clone(),
+                    else_body: self.else_body.clone().into_typed()?,
+                    else_input_mapping: self.else_input_mapping.clone(),
+                },
+                &node.inputs,
+            )
         }
-        bail!("Can only deal with constant conditions in If translation")
     }
 
     as_op!();
+}
+
+#[derive(Debug, Clone, new, Hash)]
+struct IfMir {
+    then_body: TypedModel,
+    then_input_mapping: Vec<usize>,
+    else_body: TypedModel,
+    else_input_mapping: Vec<usize>,
+}
+
+impl_dyn_hash!(IfMir);
+
+impl Op for IfMir {
+    fn name(&self) -> Cow<str> {
+        "If".into()
+    }
+
+    op_onnx!();
+    op_as_typed_op!();
+}
+
+impl EvalOp for IfMir {
+    fn is_stateless(&self) -> bool {
+        true
+    }
+
+    fn eval(&self, inputs: TVec<Arc<Tensor>>) -> TractResult<TVec<Arc<Tensor>>> {
+        let cond = inputs[0].cast_to_scalar::<bool>()?;
+        let (input_mapping, body) = if cond {
+            (&self.then_input_mapping, &self.then_body)
+        } else {
+            (&self.else_input_mapping, &self.else_body)
+        };
+        let inputs: TVec<Tensor> =
+            input_mapping.iter().map(|&ix| inputs[ix].clone().into_tensor()).collect();
+        body.clone().into_runnable()?.run(inputs)
+    }
+}
+
+impl TypedOp for IfMir {
+    as_op!();
+
+    fn output_facts(&self, _inputs: &[&TypedFact]) -> TractResult<TVec<TypedFact>> {
+        let then_outputs =
+            self.then_body.outputs.iter().copied().map(|outlet| self.then_body.outlet_fact(outlet));
+        let else_outputs =
+            self.else_body.outputs.iter().copied().map(|outlet| self.else_body.outlet_fact(outlet));
+
+        then_outputs
+            .zip(else_outputs)
+            .map(|(tfact, efact)| {
+                let (tfact, _efact) = (tfact?.without_value(), efact?.without_value());
+                // ensure!(
+                //     tfact.same_as(&efact),
+                //     "Then and Else body have different output types {:?} and {:?}",
+                //     tfact,
+                //     efact
+                // );
+                Ok(tfact)
+            })
+            .collect()
+    }
 }

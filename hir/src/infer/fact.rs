@@ -83,6 +83,23 @@ impl InferenceFact {
     pub fn without_value(self) -> InferenceFact {
         InferenceFact { value: GenericFactoid::Any, ..self }
     }
+
+    pub fn as_typed_or_symbol(self) -> TractResult<TypedFact> {
+        ensure!(!self.shape.is_open(), "Cannot have typed open shapes");
+
+        let datum_type =
+            self.datum_type.concretize().ok_or_else(|| anyhow!("Cannot concretize {:?}", self))?;
+        let shape: Vec<TDim> = self
+            .shape
+            .dims
+            .into_iter()
+            .map(|f| f.concretize().map(|e| e).unwrap_or_else(|| TDim::Sym(Symbol::new('I'))))
+            .collect();
+
+        let mut fact = TypedFact::dt_shape(datum_type, shape);
+        fact.konst = self.value.concretize();
+        Ok(fact)
+    }
 }
 
 impl Factoid for InferenceFact {
@@ -178,7 +195,7 @@ impl<'a> From<&'a TypedFact> for InferenceFact {
 }
 
 impl From<TypedFact> for InferenceFact {
-    fn from(t:TypedFact) -> InferenceFact {
+    fn from(t: TypedFact) -> InferenceFact {
         InferenceFact::from(&t)
     }
 }
