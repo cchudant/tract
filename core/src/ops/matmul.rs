@@ -36,14 +36,20 @@ pub fn compute_shape<D: DimLike>(
         std::mem::swap(&mut kb, &mut n);
     }
     if ka != kb {
-        bail!(
-            "Inconsistent matmul: a: {} b: {}, a_trans: {} b_trans: {} c_trans: {}",
-            ashape.iter().join(","),
-            bshape.iter().join(","),
-            a_trans,
-            b_trans,
-            c_trans
-        );
+        #[allow(unused_assignments)]
+        match (ka.has_sym(), kb.has_sym()) {
+            (true, false) => ka = kb.clone(),
+            (false, true) => kb = ka.clone(),
+            _ => bail!(
+                "Inconsistent matmul: a: {} b: {}, a_trans: {} b_trans: {} c_trans: {} - c_shape: {}",
+                ashape.iter().join(","),
+                bshape.iter().join(","),
+                a_trans,
+                b_trans,
+                c_trans,
+                c_shape.iter().join(",")
+            )
+        }
     }
     if c_trans {
         c_shape.push(n.clone());

@@ -70,7 +70,7 @@ pub trait DimLike:
     fn eval(&self, values: &SymbolValues) -> Self;
 
     /// Whether the struct is a TDim symbol.
-    fn is_sym(&self) -> bool { false }
+    fn has_sym(&self) -> bool { false }
 }
 
 impl DimLike for TDim {
@@ -125,8 +125,8 @@ impl DimLike for TDim {
         self.eval(values)
     }
 
-    fn is_sym(&self) -> bool {
-        matches!(self, TDim::Sym(_))
+    fn has_sym(&self) -> bool {
+        !self.symbols().is_empty()
     }
 }
 
