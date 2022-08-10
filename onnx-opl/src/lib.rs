@@ -13,6 +13,7 @@ pub mod is_nan;
 pub mod lrn;
 pub mod ml;
 pub mod non_max_suppression;
+pub mod multinomial;
 
 pub trait WithOnnx {
     fn with_onnx(self) -> Self;
