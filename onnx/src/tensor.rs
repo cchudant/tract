@@ -42,7 +42,7 @@ pub fn translate_inference_fact<'a, 'b>(
             .dim
             .iter()
             .map(|d| match &d.value {
-                Some(tensor_shape_proto::dimension::Value::DimValue(v)) if *v > 0 => {
+                Some(tensor_shape_proto::dimension::Value::DimValue(v)) => {
                     DimFact::from(v.to_dim())
                 }
                 Some(tensor_shape_proto::dimension::Value::DimParam(v)) => {
