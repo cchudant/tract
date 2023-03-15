@@ -7,18 +7,38 @@ mod mir;
 pub use lir::LirScan;
 pub use mir::Scan;
 
+/// When multiple conditions are provided, it acts as an AND of them.
+/// If no condition is provided, it will default to using the scan inputs as trip count.
+#[derive(Debug, Clone, new, Default)]
+pub struct ExitCondition {
+    /// Use a boolean state as a continue/break condition.
+    /// Index of the state from the state stack.
+    pub condition_from_state: Option<usize>,
+    /// Stop the loop at a number of iteration.
+    /// The number is taken from an input.
+    pub trip_count_from_input: Option<usize>,
+}
+
 #[derive(Clone, new, Hash, Eq, PartialEq, Copy)]
 pub struct ScanInfo {
+    /// Input/output slot index
     pub slot: usize,
+    /// Axis on which to scan
     pub axis: usize,
+    /// A single scan iteration should has `chunk` elements.
     pub chunk: isize,
 }
 
 #[derive(Clone, new, Hash)]
 pub enum InputMapping {
+    /// Input from outside the body graph, in full.
     Full { slot: usize },
+    /// Hidden state carried and modified between iterations.
     State { initializer: StateInitializer },
+    /// A Scan input.
     Scan(ScanInfo),
+    /// Iteration index
+    IterIndex,
 }
 
 impl InputMapping {
@@ -70,12 +90,23 @@ impl fmt::Debug for InputMapping {
     }
 }
 
+/// This contains the info of what to do with a body graph output after
+/// each iteration.
 #[derive(Clone, new, Hash, Default)]
 pub struct OutputMapping<F: Clone> {
+    /// `Some` if this output is a scan output.
     pub scan: Option<ScanInfo>,
-    pub full_dim_hint: Option<F>,
+
+    /// `Some` if this output should be mapped to a final output
+    /// of the Scan instruction.
+    /// The value represents the index of the input to fill.
     pub last_value_slot: Option<usize>,
+
+    /// `true` if this outputs a hidden state variable.
     pub state: bool,
+
+    /// Optional dimension of this output.
+    pub full_dim_hint: Option<F>,
 }
 
 impl<F: Clone> OutputMapping<F> {

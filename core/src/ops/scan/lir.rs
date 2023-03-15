@@ -5,10 +5,12 @@ use tract_data::internal::*;
 
 #[derive(Debug, Clone, new)]
 pub struct LirScanOpParams {
+    /// Skip the first n iterations
     pub skip: usize,
     pub plan: Arc<TypedSimplePlan<TypedModel>>,
     pub input_mapping: Vec<InputMapping>,
     pub output_mapping: Vec<OutputMapping<TDim>>,
+    pub exit_condition: ExitCondition,
 }
 
 #[derive(Debug, Clone, new)]
@@ -22,17 +24,26 @@ impl std::ops::Deref for LirScan {
 }
 
 impl LirScan {
-    pub fn iteration_count(&self, inputs: &[&TypedFact]) -> Option<TDim> {
-        let info = self
+    pub fn iteration_count(&self, inputs: &[&TypedFact]) -> TractResult<Option<TDim>> {
+        // From trip count
+        if let Some(idx) = self.exit_condition.trip_count_from_input.and_then(|e| inputs[e].konst) {
+            return Ok(Some(
+                idx.to_scalar::<TDim>().context("Trip count is not a scalar")?.clone(),
+            ));
+        }
+
+        // From scan input
+        Ok(self
             .input_mapping
             .iter()
             .find_map(|it| match it {
                 InputMapping::Scan(info) => Some(info),
                 _ => None,
             })
-            .unwrap();
-        let outside_dim = inputs[info.slot].shape[info.axis].clone();
-        Some(outside_dim / info.chunk)
+            .map(|info| {
+                let outside_dim = inputs[info.slot].shape[info.axis].clone();
+                outside_dim / info.chunk
+            }))
     }
 }
 
@@ -189,16 +200,32 @@ impl OpState for State {
         }
 
         let iters = {
-            let info = op
-                .input_mapping
+            op.input_mapping
                 .iter()
                 .find_map(|it| match it {
                     InputMapping::Scan(info) => Some(info),
                     _ => None,
                 })
-                .unwrap();
-            inputs[info.slot].shape()[info.axis].divceil(info.chunk.unsigned_abs())
+                .map(|info| inputs[info.slot].shape()[info.axis].divceil(info.chunk.unsigned_abs()))
         };
+
+        if let Some(idx) = self.op.exit_condition.trip_count_from_input.map(|e| inputs[e]) {
+            let trip_count = idx
+                .to_scalar::<TDim>()
+                .context("Trip count is not a scalar TDim")?
+                .clone()
+                .as_i64()
+                .context("Trip count is not a scalar TDim")?;
+            iters = Some(
+                trip_count
+                    .try_into()
+                    .with_context(|| format!("{} is not a valid trip count", trip_count))?,
+            );
+        }
+
+        // When we also have a condition, the final trip count is not really known before execution.
+        let trip_count_known_before =
+            self.op.exit_condition.condition_from_state.is_none() && iters.is_some();
 
         let mut outputs = tvec!();
         for (ix, output) in op.output_mapping.iter().enumerate() {
@@ -222,12 +249,33 @@ impl OpState for State {
         outputs.sort_by_key(|a| a.0);
         let mut outputs: TVec<Tensor> = outputs.into_iter().map(|(_slot, v)| v).collect();
 
-        for i in 0..iters {
+        for i in 0.. {
             *position += 1;
             if *position <= op.skip {
                 continue;
             }
+
+            // exit conditions
+
+            // iter condition
+            if iters.map(|e| e == i) == Some(true) {
+                trace!("break out of loop for reaching iteration count");
+                break;
+            }
+            // boolean hidden state condition
+            if let Some(idx) = self.op.exit_condition.condition_from_state {
+                let scalar: &bool = hidden_state[idx]
+                    .to_scalar()
+                    .context("Loop exit condition is not a scalar boolean")?;
+                if *scalar {
+                    trace!("break out of loop from boolean condition");
+                    break;
+                }
+            }
+
             hidden_state.reverse();
+
+            // prepare inputs
 
             let iter_inputs: TVec<TValue> = op
                 .input_mapping
@@ -240,6 +288,7 @@ impl OpState for State {
                                 .into_tvalue(),
                         ),
                         InputMapping::Full { slot } => Some(inputs[*slot].clone()),
+                        InputMapping::IterIndex => Some(tensor0(i.to_dim()).into()),
                     })
                 })
                 .collect::<TractResult<Vec<_>>>()?
@@ -247,15 +296,20 @@ impl OpState for State {
                 .flatten()
                 .collect();
 
+            // run the loop body
+
             trace!("iter_inputs #{}: {:?}", i, iter_inputs);
             let iter_outputs =
                 model_state.run(iter_inputs).with_context(|| "Evaluating inner body")?;
             trace!("iter_outputs #{}: {:?}", i, iter_outputs);
 
+            // handle the outputs
+
             for (v, mapping) in iter_outputs.into_iter().zip(&op.output_mapping) {
                 if let Some(info) = mapping.scan {
                     Self::assign_output(&mut outputs[info.slot], info.axis, &v, i, info.chunk < 0);
                 }
+
                 if i == iters - 1 {
                     if let Some(slot) = mapping.last_value_slot {
                         outputs[slot] = v.clone().into_tensor();

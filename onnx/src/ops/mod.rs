@@ -9,6 +9,7 @@ mod d2s;
 mod einsum;
 mod fft;
 mod logic;
+mod loop_;
 mod math;
 mod ml;
 pub mod multinomial;
