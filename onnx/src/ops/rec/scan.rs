@@ -4,6 +4,7 @@ use crate::tract_core::ops::scan::ScanInfo;
 use tract_hir::internal::*;
 
 use tract_hir::ops;
+use tract_hir::ops::scan::ExitCondition;
 
 pub fn scan(
     ctx: &ParsingContext,
@@ -83,9 +84,10 @@ pub fn scan(
             model,
             mapped_inputs,
             mapped_outputs,
-            None,
+            // None,
             true,
             GenericFactoid::default(),
+            ExitCondition::default(),
         )),
         unresolved_inputs,
     ))

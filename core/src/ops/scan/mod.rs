@@ -68,6 +68,7 @@ impl InputMapping {
                 StateInitializer::FromInput(slot) => Some(*slot),
                 _ => None,
             },
+            InputMapping::IterIndex => None,
         }
     }
 }
@@ -86,6 +87,7 @@ impl fmt::Debug for InputMapping {
                     info.slot, info.axis, info.chunk
                 )
             }
+            InputMapping::IterIndex => write!(fmt, "Iteration index.",),
         }
     }
 }
@@ -98,7 +100,7 @@ pub struct OutputMapping<F: Clone> {
     pub scan: Option<ScanInfo>,
 
     /// `Some` if this output should be mapped to a final output
-    /// of the Scan instruction.
+    /// of the Scan op.
     /// The value represents the index of the input to fill.
     pub last_value_slot: Option<usize>,
 

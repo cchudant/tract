@@ -30,6 +30,7 @@ pub fn register_all_ops(reg: &mut OnnxOpRegister) {
     reg.insert("Resize", resize::resize);
     reg.insert("NonMaxSuppression", non_max_suppression::non_max_suppression);
     reg.insert("Multinomial", multinomial::multinomial);
+    reg.insert("Loop", loop_::loop_);
     array::register_all_ops(reg);
     cast::register_all_ops(reg);
     cumsum::register_all_ops(reg);

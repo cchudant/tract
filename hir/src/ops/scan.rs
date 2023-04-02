@@ -1,18 +1,19 @@
 use crate::infer::*;
 use crate::internal::*;
 
-pub use tract_core::ops::scan::Scan;
-use tract_core::ops::scan::ScanInfo;
-pub use tract_core::ops::scan::{InputMapping, OutputMapping, StateInitializer};
+pub use tract_core::ops::scan::{
+    ExitCondition, InputMapping, OutputMapping, Scan, ScanInfo, StateInitializer,
+};
 
 #[derive(Debug, Clone, new, Default)]
 pub struct InferenceScan {
     pub body: InferenceModel,
     pub input_mapping: Vec<InputMapping>,
     pub output_mapping: Vec<OutputMapping<TDim>>,
-    pub seq_length_input_slot: Option<usize>,
+    // pub seq_length_input_slot: Option<usize>,
     pub clean_scan_counts: bool,
     pub iter_count_fact: GenericFactoid<TDim>,
+    pub exit_condition: ExitCondition,
 }
 
 impl Op for InferenceScan {
@@ -65,6 +66,7 @@ impl InferenceScan {
                     InputMapping::State { initializer } => {
                         InputMapping::State { initializer: initializer.clone() }
                     }
+                    InputMapping::IterIndex => InputMapping::IterIndex,
                 })
             })
             .collect::<TractResult<_>>()?;
@@ -93,8 +95,9 @@ impl InferenceScan {
             typed_model,
             input_mapping,
             output_mapping,
-            self.seq_length_input_slot,
+            // self.seq_length_input_slot,
             0,
+            self.exit_condition.clone(),
         )?))
     }
 
@@ -111,16 +114,10 @@ impl InferenceScan {
             .or_else(|| inner.shape.rank().concretize())
             .map(|r| r as usize);
         if let Some(rank) = rank {
-            if outer
-                .shape
-                .unify_with(&ShapeFactoid::closed(tvec!(GenericFactoid::Any; rank)))?
-            {
+            if outer.shape.unify_with(&ShapeFactoid::closed(tvec!(GenericFactoid::Any; rank)))? {
                 changed = true;
             }
-            if inner
-                .shape
-                .unify_with(&ShapeFactoid::closed(tvec!(GenericFactoid::Any; rank)))?
-            {
+            if inner.shape.unify_with(&ShapeFactoid::closed(tvec!(GenericFactoid::Any; rank)))? {
                 changed = true;
             }
             for axis in 0..rank {
@@ -151,6 +148,22 @@ impl InferenceScan {
         outputs: &mut [InferenceFact],
     ) -> TractResult<bool> {
         let mut changed = false;
+
+        let iter_count_inputs = self
+            .input_mapping
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| matches!(e, InputMapping::IterIndex))
+            .map(|(i, _)| i);
+        for inner_model_input_ix in iter_count_inputs {
+            let fact = InferenceFact::dt_shape(DatumType::TDim, shapefactoid![]);
+            trace!("Hello {fact:?}, {:?}", self.body.input_fact(inner_model_input_ix)?);
+            if self.body.input_fact(inner_model_input_ix)? != &fact {
+                self.body.set_input_fact(inner_model_input_ix, fact.clone())?;
+                changed = true;
+            }
+        }
+
         let hidden_state_len = self.input_mapping.iter().filter_map(|m| m.as_state()).count();
         for state_ix in 0..hidden_state_len {
             trace!("Unify hidden state #{}", state_ix);
@@ -230,6 +243,7 @@ impl InferenceScan {
                         }
                     }
                 }
+                InputMapping::IterIndex => {}
             }
         }
         for (ix, i) in self.output_mapping.iter().enumerate() {

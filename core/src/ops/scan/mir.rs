@@ -11,9 +11,10 @@ pub struct Scan {
     pub skip: usize,
     pub body: TypedModel,
     decluttered: bool,
-    pub seq_length_input_slot: Option<usize>,
+    // pub seq_length_input_slot: Option<usize>,
     pub input_mapping: Vec<InputMapping>,
     pub output_mapping: Vec<OutputMapping<TDim>>,
+    pub exit_condition: ExitCondition,
 }
 
 impl Scan {
@@ -29,6 +30,7 @@ impl Scan {
             Arc::new(plan),
             self.input_mapping.clone(),
             self.output_mapping.clone(),
+            self.exit_condition.clone(),
         ))))
     }
 
@@ -36,8 +38,9 @@ impl Scan {
         body: TypedModel,
         input_mapping: Vec<InputMapping>,
         output_mapping: Vec<OutputMapping<TDim>>,
-        seq_length_input_slot: Option<usize>,
+        // seq_length_input_slot: Option<usize>,
         skip: usize,
+        exit_condition: ExitCondition,
     ) -> TractResult<Scan> {
         body.check_consistency()?;
         ensure!(input_mapping.len() == body.input_outlets()?.len());
@@ -48,11 +51,12 @@ impl Scan {
             decluttered: false,
             input_mapping,
             output_mapping,
-            seq_length_input_slot,
+            exit_condition,
+            // seq_length_input_slot,
         })
     }
 
-    pub fn iteration_count(&self, inputs: &[&TypedFact]) -> Option<TDim> {
+    pub fn iteration_count(&self, inputs: &[&TypedFact]) -> TractResult<Option<TDim>> {
         self.to_codegen_op(false).unwrap().iteration_count(inputs)
     }
 
@@ -126,6 +130,7 @@ impl Scan {
                     };
                     InputMapping::State { initializer }
                 }
+                InputMapping::IterIndex => InputMapping::IterIndex,
             })
             .collect()
     }
@@ -164,8 +169,10 @@ impl Scan {
                     op.body.nodes[src.node].inputs.clear();
                     op.body.nodes[src.node].op = Box::new(Const::new(konst.clone()));
                     op.input_mapping.remove(body_input_id);
-                    op.input_mapping =
-                        Self::remove_outer_input_from_mappings(&op.input_mapping, *outer_input_slot);
+                    op.input_mapping = Self::remove_outer_input_from_mappings(
+                        &op.input_mapping,
+                        *outer_input_slot,
+                    );
                     let mut inputs = node.inputs.clone();
                     inputs.remove(*outer_input_slot);
                     return Ok(Some(TypedModelPatch::replace_single_op(model, node, &inputs, op)?));
@@ -211,14 +218,7 @@ impl Scan {
                 && !self.body.output_outlets()?.contains(input)
             {
                 let mut new_inputs = node.inputs.clone();
-                let slot = match &self.input_mapping[inner_input_id] {
-                    InputMapping::Full { slot } => Some(*slot),
-                    InputMapping::Scan(info) => Some(info.slot),
-                    InputMapping::State { initializer } => match initializer {
-                        StateInitializer::FromInput(n) => Some(*n),
-                        _ => None,
-                    },
-                };
+                let slot = self.input_mapping[inner_input_id].slot();
                 let mut new_mappings: Vec<_> = self.input_mapping.clone();
                 new_mappings.remove(inner_input_id);
                 if let Some(slot) = slot {
@@ -238,10 +238,11 @@ impl Scan {
                 let op = Self {
                     body,
                     skip: self.skip,
-                    seq_length_input_slot: self.seq_length_input_slot,
+                    // seq_length_input_slot: self.seq_length_input_slot,
                     input_mapping: new_mappings,
                     decluttered: true,
                     output_mapping: self.output_mapping.clone(),
+                    exit_condition: self.exit_condition.clone(),
                 };
                 return Ok(Some(TypedModelPatch::replace_single_op(model, node, &new_inputs, op)?));
             }
@@ -385,7 +386,8 @@ impl Scan {
                             decluttered: false,
                             body: new_body,
                             skip: self.skip,
-                            seq_length_input_slot: self.seq_length_input_slot,
+                            exit_condition: self.exit_condition.clone(),
+                            // seq_length_input_slot: self.seq_length_input_slot,
                         };
                         let output_wires =
                             outside_patch.wire_node(&*node.name, new_op, &patch_inputs)?;
@@ -406,13 +408,15 @@ impl Scan {
         &self,
         _session: &mut OptimizerSession,
         model: &TypedModel,
-        node: &TypedNode) -> TractResult<Option<TypedModelPatch>> {
+        node: &TypedNode,
+    ) -> TractResult<Option<TypedModelPatch>> {
         for (model_output_ix, mapping) in self.output_mapping.iter().enumerate() {
             if let Some(slot) = mapping.last_value_slot {
                 if let Some(k) = self.body.output_fact(model_output_ix)?.konst.clone() {
                     let inner_node = self.body.output_outlets()?[model_output_ix].node;
                     let inner_node = self.body.node(inner_node);
-                    let mut patch = TypedModelPatch::new(format!("Extract const node {inner_node}"));
+                    let mut patch =
+                        TypedModelPatch::new(format!("Extract const node {inner_node}"));
                     let cst = patch.add_const(format!("{}.{}", &node.name, &inner_node.name), k)?;
                     patch.shunt_outside(model, OutletId::new(node.id, slot), cst)?;
                     return Ok(Some(patch));
@@ -491,7 +495,8 @@ impl Scan {
                     decluttered: false,
                     body: new_body,
                     skip: self.skip,
-                    seq_length_input_slot: self.seq_length_input_slot,
+                    exit_condition: self.exit_condition.clone(),
+                    // seq_length_input_slot: self.seq_length_input_slot,
                 };
                 let scan_outputs = outside_patch.wire_node(&node.name, new_op, &inputs)?;
                 let output = mapping.scan.unwrap();
@@ -601,6 +606,7 @@ impl Scan {
                             };
                         }
                     },
+                    InputMapping::IterIndex => {}
                 };
             }
         }

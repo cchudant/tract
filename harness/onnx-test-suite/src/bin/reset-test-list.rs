@@ -1,8 +1,11 @@
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
+use std::process::Stdio;
 
-const SETS: &[&str] = &["node", "real", "simple", "pytorch-operator", "pytorch-converted"];
-const VERSIONS: &[&str] = &["1.4.1", "1.5.0", "1.6.0", "1.7.0", "1.8.1", "1.9.0", "1.10.2", "1.11.0", "1.12.0", "1.13.0"];
+const SETS: &[&str] = &["node"];
+//, "real", "simple", "pytorch-operator", "pytorch-converted"];
+// const VERSIONS: &[&str] = &["1.4.1", "1.5.0", "1.6.0", "1.7.0", "1.8.1", "1.9.0", "1.10.2", "1.11.0", "1.12.0", "1.13.0"];
+const VERSIONS: &[&str] = &["1.13.0"];
 
 // const SETS: &[&str] = &["node"];
 // const VERSIONS: &[&str] = &["1.4.1"];
@@ -14,10 +17,14 @@ fn run_set(set: &str, ver: &str) -> HashMap<String, usize> {
     if set == "real" {
         command.arg("--release");
     }
+    command.arg("--profile").arg("opt-no-lto");
     command.arg("--").arg("--ignored").arg(filter);
+    command.stderr(Stdio::inherit());
+    // command.stdout(Stdio::inherit());
     let output = command.output().unwrap();
     let mut unexpected: HashMap<String, usize> = HashMap::default();
     for line in std::io::BufReader::new(&mut &*output.stdout).lines() {
+        eprintln!("{:?}", line);
         let line = line.unwrap();
         if line.ends_with("ok") {
             let test_id =

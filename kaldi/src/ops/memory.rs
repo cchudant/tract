@@ -1,6 +1,6 @@
 use bit_set::BitSet;
 use std::collections::BTreeMap;
-use tract_hir::tract_core::ops::scan::ScanInfo;
+use tract_hir::{ops::scan::ExitCondition, tract_core::ops::scan::ScanInfo};
 use tract_itertools::Itertools;
 
 use tract_hir::internal::*;
@@ -10,8 +10,6 @@ pub struct Memory {
     pub name: String,
     pub offset: isize,
 }
-
-
 
 impl Op for Memory {
     fn name(&self) -> Cow<str> {
@@ -215,9 +213,10 @@ fn incorporate_memory_ops_as_scans(
             inner_model,
             mapped_inputs,
             mapped_outputs,
-            None,
+            // None,
             false,
             GenericFactoid::default(),
+            ExitCondition::default(),
         );
 
         let mut output_facts = tvec!();

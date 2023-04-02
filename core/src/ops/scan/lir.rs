@@ -3,6 +3,53 @@ use crate::ops::OpStateFreeze;
 use super::*;
 use tract_data::internal::*;
 
+enum ScanIterOutput {
+    /// Concat multiple tensors
+    StackTensors {
+        tensors: TVec<Tensor>,
+        axis: usize,
+    },
+    /// Assign to existing tensor
+    Assign(Tensor),
+    LastValueSlot(TValue),
+}
+
+impl ScanIterOutput {
+    fn into_tvalue(self) -> TractResult<TValue> {
+        match self {
+            ScanIterOutput::Assign(output) => Ok(output.into_tvalue()),
+            ScanIterOutput::StackTensors { tensors, axis } => {
+                Tensor::stack_tensors(axis, &tensors).map(|e| e.into_tvalue())
+            }
+            ScanIterOutput::LastValueSlot(output) => Ok(output),
+        }
+    }
+
+    fn assign_output(&mut self, axis: usize, element_value: Tensor, i: usize, backward: bool) {
+        match self {
+            ScanIterOutput::Assign(output) => {
+                let full_len = output.shape()[axis];
+                let offset = if backward {
+                    full_len - 1 - i * element_value.shape()[axis]
+                } else {
+                    i * element_value.shape()[axis]
+                };
+                let count = element_value.shape()[axis].min(output.shape()[axis] - offset);
+                unsafe {
+                    output.assign_slice_unchecked(
+                        offset..offset + count,
+                        &element_value,
+                        ..count,
+                        axis,
+                    )
+                };
+            }
+            ScanIterOutput::StackTensors { tensors, .. } => tensors.push(element_value),
+            _ => unreachable!("Cannot assign to a const iter output"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, new)]
 pub struct LirScanOpParams {
     /// Skip the first n iterations
@@ -26,7 +73,9 @@ impl std::ops::Deref for LirScan {
 impl LirScan {
     pub fn iteration_count(&self, inputs: &[&TypedFact]) -> TractResult<Option<TDim>> {
         // From trip count
-        if let Some(idx) = self.exit_condition.trip_count_from_input.and_then(|e| inputs[e].konst) {
+        if let Some(idx) =
+            self.exit_condition.trip_count_from_input.and_then(|e| inputs[e].konst.clone())
+        {
             return Ok(Some(
                 idx.to_scalar::<TDim>().context("Trip count is not a scalar")?.clone(),
             ));
@@ -158,25 +207,6 @@ impl State {
             Ok(t)
         }
     }
-
-    pub(super) fn assign_output(
-        output: &mut Tensor,
-        axis: usize,
-        element_value: &Tensor,
-        i: usize,
-        backward: bool,
-    ) {
-        let full_len = output.shape()[axis];
-        let offset = if backward {
-            full_len - 1 - i * element_value.shape()[axis]
-        } else {
-            i * element_value.shape()[axis]
-        };
-        let count = element_value.shape()[axis].min(output.shape()[axis] - offset);
-        unsafe {
-            output.assign_slice_unchecked(offset..offset + count, element_value, ..count, axis)
-        };
-    }
 }
 
 impl OpState for State {
@@ -199,7 +229,7 @@ impl OpState for State {
             }
         }
 
-        let iters = {
+        let mut max_iter = {
             op.input_mapping
                 .iter()
                 .find_map(|it| match it {
@@ -209,45 +239,62 @@ impl OpState for State {
                 .map(|info| inputs[info.slot].shape()[info.axis].divceil(info.chunk.unsigned_abs()))
         };
 
-        if let Some(idx) = self.op.exit_condition.trip_count_from_input.map(|e| inputs[e]) {
-            let trip_count = idx
+        let trip_count_condition = if let Some(condition) = op.exit_condition.trip_count_from_input
+        {
+            let input = inputs.get(condition).context("Trip count input not present")?;
+            let input = input
                 .to_scalar::<TDim>()
-                .context("Trip count is not a scalar TDim")?
-                .clone()
-                .as_i64()
-                .context("Trip count is not a scalar TDim")?;
-            iters = Some(
-                trip_count
-                    .try_into()
-                    .with_context(|| format!("{} is not a valid trip count", trip_count))?,
-            );
-        }
+                .context("Converting trip count input to scalar")?
+                .to_i64()?;
+            if input < 0 {
+                bail!("Trip count is negative")
+            }
+            Some(input as usize)
+        } else {
+            None
+        };
 
-        // When we also have a condition, the final trip count is not really known before execution.
-        let trip_count_known_before =
-            self.op.exit_condition.condition_from_state.is_none() && iters.is_some();
+        if op.exit_condition.condition_from_state.is_none() {
+            max_iter = match (max_iter, trip_count_condition) {
+                (None, Some(c)) | (Some(c), None) => Some(c),
+                (None, None) => None,
+                (Some(a), Some(b)) => Some(usize::min(a, b)),
+            }
+        }
 
         let mut outputs = tvec!();
         for (ix, output) in op.output_mapping.iter().enumerate() {
             if let Some(info) = output.scan {
-                let fact = op.plan.model().output_fact(ix)?;
-                let mut shape: TVec<usize> =
-                    fact.shape.eval_to_usize(&session.resolved_symbols)?.into_owned();
-                let scanning_dim = output
-                    .full_dim_hint
-                    .as_ref()
-                    .and_then(|d| d.to_usize().ok())
-                    .unwrap_or(shape[info.axis] * iters);
-                shape[info.axis] = scanning_dim;
-                let t = unsafe { Tensor::uninitialized_dt(fact.datum_type, &shape)? };
-                outputs.push((info.slot, t));
+                if let Some(max_iter) = max_iter {
+                    // Output is a scan and we know how many loop trip we will do
+                    let fact = op.plan.model().output_fact(ix)?;
+                    let mut shape: TVec<usize> =
+                        fact.shape.eval_to_usize(&session.resolved_symbols)?.into_owned();
+                    let scanning_dim = output
+                        .full_dim_hint
+                        .as_ref()
+                        .and_then(|d| d.to_usize().ok())
+                        .unwrap_or(shape[info.axis] * max_iter);
+                    shape[info.axis] = scanning_dim;
+                    let t = unsafe { Tensor::uninitialized_dt(fact.datum_type, &shape)? };
+                    outputs.push((info.slot, ScanIterOutput::Assign(t)));
+                } else {
+                    outputs.push((
+                        info.slot,
+                        ScanIterOutput::StackTensors {
+                            tensors: Default::default(),
+                            axis: info.axis,
+                        },
+                    ));
+                }
             }
             if let Some(slot) = output.last_value_slot {
-                outputs.push((slot, Tensor::default()));
+                outputs
+                    .push((slot, ScanIterOutput::LastValueSlot(Tensor::default().into_tvalue())));
             }
         }
         outputs.sort_by_key(|a| a.0);
-        let mut outputs: TVec<Tensor> = outputs.into_iter().map(|(_slot, v)| v).collect();
+        let mut outputs: TVec<ScanIterOutput> = outputs.into_iter().map(|(_slot, v)| v).collect();
 
         for i in 0.. {
             *position += 1;
@@ -258,12 +305,16 @@ impl OpState for State {
             // exit conditions
 
             // iter condition
-            if iters.map(|e| e == i) == Some(true) {
-                trace!("break out of loop for reaching iteration count");
+            if max_iter >= Some(i) {
+                trace!("break out of loop for reaching max iteration count");
+                break;
+            }
+            if trip_count_condition >= Some(i) {
+                trace!("break out of loop for reaching max trip count");
                 break;
             }
             // boolean hidden state condition
-            if let Some(idx) = self.op.exit_condition.condition_from_state {
+            if let Some(idx) = op.exit_condition.condition_from_state {
                 let scalar: &bool = hidden_state[idx]
                     .to_scalar()
                     .context("Loop exit condition is not a scalar boolean")?;
@@ -306,22 +357,26 @@ impl OpState for State {
             // handle the outputs
 
             for (v, mapping) in iter_outputs.into_iter().zip(&op.output_mapping) {
-                if let Some(info) = mapping.scan {
-                    Self::assign_output(&mut outputs[info.slot], info.axis, &v, i, info.chunk < 0);
+                if let Some(slot) = mapping.last_value_slot {
+                    outputs[slot] = ScanIterOutput::LastValueSlot(v.clone());
                 }
 
-                if i == iters - 1 {
-                    if let Some(slot) = mapping.last_value_slot {
-                        outputs[slot] = v.clone().into_tensor();
-                    }
+                if let Some(info) = mapping.scan {
+                    outputs[info.slot].assign_output(
+                        info.axis,
+                        v.clone().into_tensor(),
+                        i,
+                        info.chunk < 0,
+                    )
                 }
+
                 if mapping.state {
-                    hidden_state.push(v);
+                    hidden_state.push(v)
                 }
             }
         }
 
-        Ok(outputs.into_iter().map(|t| t.into_tvalue()).collect())
+        outputs.into_iter().map(|t| Ok(t.into_tvalue()?)).collect()
     }
 }
 

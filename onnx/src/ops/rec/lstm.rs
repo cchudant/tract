@@ -2,6 +2,7 @@ use crate::model::ParsingContext;
 use crate::pb::*;
 use tract_hir::internal::*;
 use tract_hir::ops;
+use tract_hir::ops::scan::ExitCondition;
 use tract_hir::tract_core::ops::matmul::MatMulAxes;
 use tract_hir::tract_core::ops::scan::ScanInfo;
 
@@ -483,8 +484,9 @@ impl LSTM {
                 body,
                 input_mapping,
                 vec![h_mapping, c_mapping],
-                self.optional_sequence_lens_input,
+                // self.optional_sequence_lens_input,
                 0,
+                ExitCondition::default(),
             )?,
             &outer_inputs,
         )?;

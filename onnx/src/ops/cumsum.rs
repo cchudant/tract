@@ -1,4 +1,5 @@
 use tract_hir::internal::*;
+use tract_hir::ops::scan::ExitCondition;
 use tract_hir::tract_core::ops::scan::ScanInfo;
 
 use crate::model::{OnnxOpRegister, ParsingContext};
@@ -22,8 +23,6 @@ struct CumSum {
     reverse: bool,
     exclusive: bool,
 }
-
-
 
 impl Expansion for CumSum {
     fn name(&self) -> Cow<str> {
@@ -81,7 +80,14 @@ impl Expansion for CumSum {
         let acc = body.add_source("acc_input", var_fact)?;
         let sum = body.wire_node("add", tract_core::ops::math::add(), &[x, acc])?[0];
         body.set_output_outlets(&[sum, acc])?;
-        let scan = scan::Scan::new(body, input_mapping, output_mapping, None, 0)?;
+        let scan = scan::Scan::new(
+            body,
+            input_mapping,
+            output_mapping,
+            // None,
+            0,
+            ExitCondition::default(),
+        )?;
         let wires = model.wire_node(prefix, scan, &[inputs[0], init])?;
         let output = wires[self.exclusive as usize];
         Ok(tvec![output])

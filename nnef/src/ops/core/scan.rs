@@ -96,6 +96,7 @@ fn ser_scan(ast: &mut IntoAst, node: &TypedNode) -> TractResult<Option<Arc<RValu
             InputMapping::Full { slot } => {
                 full.push(tuple_2(name, ast.mapping[&node.inputs[*slot]].as_ref().clone()))
             }
+            InputMapping::IterIndex => todo!(),
         }
     }
     for tensor in body_tensors.iter().sorted_by_key(|t| &t.label) {
@@ -260,7 +261,14 @@ fn de_scan(builder: &mut ModelBuilder, invocation: &ResolvedInvocation) -> Tract
         });
     }
     let skip: usize = invocation.named_arg_as(builder, "skip")?;
-    let op = Scan::new(body.model, input_mapping, output_mapping, None, skip)?;
+    let op = Scan::new(
+        body.model,
+        input_mapping,
+        output_mapping,
+        // None,
+        skip,
+        ExitCondition::default(),
+    )?;
     builder.wire(op, &outer_inputs)
 }
 
